@@ -58,24 +58,20 @@ def test_instances_are_isolated():
 
 
 @given(st.integers())
-def test_clear_resets_to_unset(n):
+def test_reset_to_unset(n):
     tv = TypedValue(int)
     tv.value = n
-    tv.clear()
+    tv.reset()
     assert not tv._value_set
     with pytest.raises(AttributeError):
         _ = tv.value
 
 
-def test_has_value():
+def test_value_set():
     tv = TypedValue(int)
-    assert not tv.has_value
-    tv.default_value = 0
-    assert tv.has_value
-    tv.clear_default_value()
-    assert not tv.has_value
+    assert not tv.value_set
     tv.value = 1
-    assert tv.has_value
+    assert tv.value_set
 
 
 @given(st.integers())
@@ -101,26 +97,6 @@ def test_repr_shows_type_and_value():
 
 
 @given(st.integers())
-def test_default_value_used_when_value_unset(n):
-    tv = TypedValue(int)
-    tv.default_value = n
-    assert tv.value == n
-
-
-def test_default_value_before_set_raises():
-    with pytest.raises(AttributeError):
-        _ = TypedValue(int).default_value
-
-
-def test_clear_value_falls_back_to_default():
-    tv = TypedValue(int)
-    tv.default_value = 0
-    tv.value = 1
-    tv.clear_value()
-    assert tv.value == 0
-
-
-@given(st.integers())
 def test_value_equal_different_types(n):
     tv_int = TypedValue(int)
     tv_float = TypedValue(float)
@@ -135,5 +111,5 @@ def test_exactly_equal(n):
     tv1.value = n
     tv2.value = n
     assert tv1.exactly_equal(tv2)
-    tv2.default_value = n
+    tv2.reset()
     assert not tv1.exactly_equal(tv2)

@@ -1,4 +1,4 @@
-from collections.abc import Generator
+from collections.abc import Callable, Generator, Iterable
 from contextlib import contextmanager
 
 from logilink.value import TypedValue
@@ -9,7 +9,7 @@ class ManagedTypedValue[T](TypedValue[T]):
         super().__init__(type)
         self.name = name
         self._store: ValueStore | None = None
-        self._value_updated: bool = False
+        self._value_updated_flag: bool = False
 
     @property
     def store(self) -> "ValueStore | None":
@@ -21,11 +21,11 @@ class ManagedTypedValue[T](TypedValue[T]):
         self._store = store
 
     @property
-    def value_updated(self) -> bool:
-        return self._value_updated
+    def value_updated_flag(self) -> bool:
+        return self._value_updated_flag
 
-    def _clear_updated(self) -> None:
-        self._value_updated = False
+    def _reset_updated_flag(self) -> None:
+        self._value_updated_flag = False
 
     def _assert_mutable(self) -> None:
         if self._store is not None and self._store.locked:
@@ -34,23 +34,15 @@ class ManagedTypedValue[T](TypedValue[T]):
     def _set_value(self, value: T):
         self._assert_mutable()
         super()._set_value(value)
-        self._value_updated = True
+        self._value_updated_flag = True
+        if self._store is not None:
+            self._store._notify_change()
 
-    def _set_default_value(self, value: T):
+    def reset(self):
         self._assert_mutable()
-        super()._set_default_value(value)
-
-    def clear_value(self):
-        self._assert_mutable()
-        super().clear_value()
-
-    def clear_default_value(self):
-        self._assert_mutable()
-        super().clear_default_value()
-
-    def clear(self):
-        self._assert_mutable()
-        super().clear()
+        super().reset()
+        if self._store is not None:
+            self._store._notify_change()
 
     def __repr__(self) -> str:
         type_name = getattr(self._type, "__name__", repr(self._type))
@@ -64,24 +56,18 @@ class ValueStore[TV: ManagedTypedValue]:
         self._type = prototype._type
         self._locked = False
         self._values: dict[str, TV] = {}
+        self._on_change_callbacks: list[Callable[[], None]] = []
+        self._on_change_batching: bool = False
+        self._on_change_pending: bool = False
 
-    @property
-    def locked(self) -> bool:
-        return self._locked
+    def __repr__(self) -> str:
+        return f"ValueStore({list(self._values)!r})"
 
-    @contextmanager
-    def with_lock(self) -> Generator[None, None, None]:
-        self._locked = True
-        try:
-            yield
-        finally:
-            self._locked = False
-
-    def register(self, mv: TV) -> TV:
+    def add_value(self, mv: TV) -> TV:
         if self._locked:
             raise RuntimeError("store is locked")
         if mv.name in self._values:
-            raise KeyError(f"{mv.name!r} is already registered")
+            raise KeyError(f"{mv.name!r} is already added")
         mv.set_store(self)
         self._values[mv.name] = mv
         return mv
@@ -95,20 +81,79 @@ class ValueStore[TV: ManagedTypedValue]:
     def __contains__(self, name: str) -> bool:
         return name in self._values
 
+    def values(self) -> Iterable[TV]:
+        return self._values.values()
+
     def __len__(self) -> int:
         return len(self._values)
 
-    def check_all_updated_values_equal(self, state: bool) -> bool:
-        return all(mv.value_updated == state for mv in self._values.values())
+    def remove_value(self, name: str) -> TV:
+        if self._locked:
+            raise RuntimeError("store is locked")
+        try:
+            return self._values.pop(name)
+        except KeyError:
+            raise KeyError(f"{name!r} is not registered") from None
 
-    def assert_all_updated_values_equal(self, state: bool) -> None:
-        failing = [name for name, mv in self._values.items() if mv.value_updated != state]
+    def clear_values(self) -> None:
+        if self._locked:
+            raise RuntimeError("store is locked")
+        self._values.clear()
+
+    def reset_values(self) -> None:
+        for mv in self._values.values():
+            mv.reset()
+
+    # lock
+
+    @property
+    def locked(self) -> bool:
+        return self._locked
+
+    @contextmanager
+    def with_lock(self) -> Generator[None, None, None]:
+        self._locked = True
+        try:
+            yield
+        finally:
+            self._locked = False
+
+    # on_change
+
+    def add_on_change_callback(self, callback: Callable[[], None]) -> None:
+        self._on_change_callbacks.append(callback)
+
+    def clear_on_change_callbacks(self) -> None:
+        self._on_change_callbacks.clear()
+
+    def _notify_change(self) -> None:
+        if self._on_change_batching:
+            self._on_change_pending = True
+            return
+        for cb in self._on_change_callbacks:
+            cb()
+
+    @contextmanager
+    def with_batch_changes(self) -> Generator[None, None, None]:
+        self._on_change_batching = True
+        try:
+            yield
+        finally:
+            self._on_change_batching = False
+            if self._on_change_pending:
+                self._on_change_pending = False
+                self._notify_change()
+
+    # value_updated_flag
+
+    def check_all_value_updated_flag(self, state: bool) -> bool:
+        return all(mv.value_updated_flag == state for mv in self._values.values())
+
+    def assert_all_value_updated_flag(self, state: bool) -> None:
+        failing = [name for name, mv in self._values.items() if mv.value_updated_flag != state]
         if failing:
             raise RuntimeError(f"values not matching updated state={state}: {failing}")
 
-    def clear_updated(self) -> None:
+    def reset_all_value_updated_flag(self) -> None:
         for mv in self._values.values():
-            mv._clear_updated()
-
-    def __repr__(self) -> str:
-        return f"ValueStore({list(self._values)!r})"
+            mv._reset_updated_flag()
