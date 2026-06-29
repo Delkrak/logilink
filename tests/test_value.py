@@ -113,3 +113,9 @@ def test_exactly_equal(n):
     assert tv1.exactly_equal(tv2)
     tv2.reset()
     assert not tv1.exactly_equal(tv2)
+
+
+def test_exactly_equal_non_typed_value_returns_false():
+    tv = TypedValue(int)
+    tv.value = 1
+    assert not tv.exactly_equal(1)

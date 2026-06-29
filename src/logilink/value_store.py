@@ -10,6 +10,7 @@ class ManagedTypedValue[T](TypedValue[T]):
         self.name = name
         self._store: ValueStore | None = None
         self._value_updated_flag: bool = False
+        self._value_changed_flag: bool = False
 
     @property
     def store(self) -> "ValueStore | None":
@@ -24,8 +25,15 @@ class ManagedTypedValue[T](TypedValue[T]):
     def value_updated_flag(self) -> bool:
         return self._value_updated_flag
 
+    @property
+    def value_changed_flag(self) -> bool:
+        return self._value_changed_flag
+
     def _reset_updated_flag(self) -> None:
         self._value_updated_flag = False
+
+    def _reset_changed_flag(self) -> None:
+        self._value_changed_flag = False
 
     def _assert_mutable(self) -> None:
         if self._store is not None and self._store.locked:
@@ -33,14 +41,19 @@ class ManagedTypedValue[T](TypedValue[T]):
 
     def _set_value(self, value: T):
         self._assert_mutable()
+        old_value = self._value
+        old_set = self._value_set
         super()._set_value(value)
         self._value_updated_flag = True
+        self._value_changed_flag = (not old_set) or (self._value != old_value)
         if self._store is not None:
             self._store._notify_change()
 
     def reset(self):
         self._assert_mutable()
         super().reset()
+        self._value_updated_flag = False
+        self._value_changed_flag = False
         if self._store is not None:
             self._store._notify_change()
 
@@ -51,11 +64,11 @@ class ManagedTypedValue[T](TypedValue[T]):
         return f"ManagedTypedValue[{type_name}](name={self.name!r}, <unset>)"
 
 
-class ValueStore[TV: ManagedTypedValue]:
-    def __init__(self, prototype: TV):
-        self._type = prototype._type
+class ValueStore[T_VALUE: ManagedTypedValue]:
+    def __init__(self, value_type: type[T_VALUE]):
+        self._value_type = value_type
         self._locked = False
-        self._values: dict[str, TV] = {}
+        self._values: dict[str, T_VALUE] = {}
         self._on_change_callbacks: list[Callable[[], None]] = []
         self._on_change_batching: bool = False
         self._on_change_pending: bool = False
@@ -63,16 +76,18 @@ class ValueStore[TV: ManagedTypedValue]:
     def __repr__(self) -> str:
         return f"ValueStore({list(self._values)!r})"
 
-    def add_value(self, mv: TV) -> TV:
+    def add_value(self, mv: T_VALUE) -> T_VALUE:
         if self._locked:
             raise RuntimeError("store is locked")
+        if not isinstance(mv, self._value_type):
+            raise TypeError(f"expected {self._value_type.__name__!r}, got {type(mv).__name__!r}")
         if mv.name in self._values:
             raise KeyError(f"{mv.name!r} is already added")
         mv.set_store(self)
         self._values[mv.name] = mv
         return mv
 
-    def __getitem__(self, name: str) -> TV:
+    def __getitem__(self, name: str) -> T_VALUE:
         try:
             return self._values[name]
         except KeyError:
@@ -81,13 +96,13 @@ class ValueStore[TV: ManagedTypedValue]:
     def __contains__(self, name: str) -> bool:
         return name in self._values
 
-    def values(self) -> Iterable[TV]:
+    def values(self) -> Iterable[T_VALUE]:
         return self._values.values()
 
     def __len__(self) -> int:
         return len(self._values)
 
-    def remove_value(self, name: str) -> TV:
+    def remove_value(self, name: str) -> T_VALUE:
         if self._locked:
             raise RuntimeError("store is locked")
         try:
@@ -109,6 +124,12 @@ class ValueStore[TV: ManagedTypedValue]:
     @property
     def locked(self) -> bool:
         return self._locked
+
+    def lock(self):
+        self._locked = True
+
+    def unlock(self):
+        self._locked = False
 
     @contextmanager
     def with_lock(self) -> Generator[None, None, None]:
@@ -157,3 +178,17 @@ class ValueStore[TV: ManagedTypedValue]:
     def reset_all_value_updated_flag(self) -> None:
         for mv in self._values.values():
             mv._reset_updated_flag()
+
+    # value_changed_flag
+
+    def check_all_value_changed_flag(self, state: bool) -> bool:
+        return all(mv.value_changed_flag == state for mv in self._values.values())
+
+    def assert_all_value_changed_flag(self, state: bool) -> None:
+        failing = [name for name, mv in self._values.items() if mv.value_changed_flag != state]
+        if failing:
+            raise RuntimeError(f"values not matching changed state={state}: {failing}")
+
+    def reset_all_value_changed_flag(self) -> None:
+        for mv in self._values.values():
+            mv._reset_changed_flag()
